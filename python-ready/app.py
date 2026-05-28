@@ -18,7 +18,7 @@ def healthz():
 @app.route('/ready')
 def ready():
     # Endpoint simple para readiness
-    return "Listo v3", 200
+    return "Listo v4 - Test webhook u995238", 200
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8080)
