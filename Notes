@@ -1,0 +1,1661 @@
+### Preview
+
+Diferencias entre desarrollo tradicional orientado a middleware vs contenedores
+pom.xml
+```
+<dependencies>
+    <dependency>
+        <groupId>jakarta.platform</groupId>
+        <artifactId>jakarta.jakartaee-api</artifactId>
+        <version>10.0.0</version>
+        <scope>provided</scope>
+    </dependency>
+</dependencies>
+```
+jboss-deployment-structure.xml
+```
+<?xml version="1.0" encoding="UTF-8"?>
+<jboss-deployment-structure>
+    <deployment>
+        <dependencies>
+            <module name="org.apache.log4j" />
+        </dependencies>
+    </deployment>
+</jboss-deployment-structure>
+```
+Java Code
+```
+import org.apache.log4j.Logger;
+public class MiServicio {
+    
+    private static final Logger logger = Logger.getLogger(MiServicio.class);
+    public void ejecutar() { 
+	    logger.info("Logueando desde WildFly usando el módulo del servidor.");
+	}
+}
+```
+
+
+pom.xml containerized
+```
+<dependencies>
+    <dependency>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-web</artifactId>
+    </dependency>
+    <dependency>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-log4j2</artifactId>
+    </dependency>
+</dependencies>
+
+<build>
+    <plugins>
+        <plugin>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-maven-plugin</artifactId>
+        </plugin>
+    </plugins>
+</build>
+```
+
+|**Característica**|**En WildFly (Tradicional)**|**En Docker (Moderno / Microservicios)**|
+|---|---|---|
+|**Tamaño del artefacto**|**Muy pequeño (KB o pocos MB).** Solo contiene tu código de negocio recopilado.|**Grande (50MB - 200MB+).** Contiene tu código + Tomcat/Netty + todas las librerías necesarias.|
+|**Gestión de dependencias**|Compartida. Si actualizas la versión de Log4j en WildFly, afecta a todas las Apps que dependan de ese módulo.|Aislada. Cada contenedor tiene exactamente la versión de la librería con la que fue compilado.|
+|**Configuración del Entorno**|Compleja. Requiere configurar datasources, colas JMS y módulos en el `standalone.xml` del servidor.|Simple. Todo se configura por variables de entorno directamente al contenedor.|
+
+
+1. Node.js (Express)
+Basico
+```
+FROM node:20-alpine
+
+WORKDIR /app
+
+COPY package*.json ./
+
+RUN npm install
+
+COPY . .
+
+EXPOSE 3000
+
+CMD ["node", "app.js"]
+```
+Build app
+```
+podman build -t basic-node:basic -f Dockerfile.basic .
+```
+Avanzado
+```
+FROM node:20-alpine AS builder
+WORKDIR /app
+COPY package*.json ./
+
+RUN npm ci
+COPY . .
+
+FROM node:20-alpine AS dependency-cleaner
+WORKDIR /app
+COPY package*.json ./
+RUN npm ci --only=production
+
+FROM node:20-alpine
+WORKDIR /app
+ENV NODE_ENV=production
+
+COPY --from=dependency-cleaner /app/node_modules ./node_modules
+COPY --from=builder /app/package.json ./package.json
+
+COPY . .
+
+USER node
+
+EXPOSE 3000
+CMD ["node", "app.js"]
+```
+
+Build app
+```
+podman build -t basic-node:ms -f Dockerfile.multi-stage .
+```
+
+| **Comando**                    | **¿Dónde se usa principalmente?** | **¿Incluye devDependencies?** | **Propósito Clave**                                               |
+| ------------------------------ | --------------------------------- | ----------------------------- | ----------------------------------------------------------------- |
+| **`npm install`**              | Máquina Local (Desarrollo)        | Sí                            | Descargar librerías y experimentar.                               |
+| **`npm ci`**                   | Dockerfile (Etapa de compilación) | Sí                            | Instalación rápida y exacta para poder compilar (ej. TypeScript). |
+| **`npm ci --only=production`** | Dockerfile (Etapa de ejecución)   | **No**                        | Minimizar el tamaño y asegurar la imagen de producción.           |
+| **`npm run build`**            | Dockerfile (Etapa de compilación) | N/A                           | Generar el código JavaScript final listo para ser empaquetado.    |
+| **`npm start`**                | Dockerfile (Directiva `CMD`)      | N/A                           | Levantar el servidor web dentro del contenedor de OpenShift.      |
+
+2. Quarkus (Java 21)
+```
+# =============================================================
+#  DOCKERFILE BÁSICO — una sola etapa
+
+FROM eclipse-temurin:21
+
+# Instalar Maven desde los repositorios de Debian
+# Esto descarga Maven + sus dependencias transitivas
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends maven && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Copiar el proyecto completo (fuentes incluidas)
+COPY pom.xml .
+COPY src ./src
+
+# Descargar dependencias y compilar
+RUN mvn package -DskipTests
+
+EXPOSE 8080
+
+# Arrancar la aplicación Quarkus (fast-jar)
+CMD ["java", "-jar", "target/quarkus-app/quarkus-run.jar"]
+```
+Build app
+```
+./mvn clean package -DskipTest
+```
+
+Build image
+```
+podman build -t quarkus-demo:basic -f Dockerfile.basic .
+```
+
+| **Comando**                        | **¿Dónde se usa principalmente?** | **¿Requiere GraalVM?** | **Propósito Clave**                                                                            |
+| ---------------------------------- | --------------------------------- | ---------------------- | ---------------------------------------------------------------------------------------------- |
+| **`./mvnw quarkus:dev`**           | Máquina Local (Desarrollo)        | No                     | Programar con _Live Coding_ y recarga en vivo sin compilar manualmente.                        |
+| **`./mvnw dependency:go-offline`** | Dockerfile (Etapa intermedia)     | No                     | Descargar y cachear todas las dependencias de Maven para acelerar futuros builds.              |
+| **`./mvnw package -DskipTests`**   | Dockerfile (Modo JVM estándar)    | No                     | Generar el artefacto **Fast-jar** optimizado para su ejecución en una imagen con JRE 21.       |
+| **`./mvnw package -Dnative`**      | Dockerfile (Modo Nativo Avanzado) | **Sí** (En el builder) | Crear un binario nativo de Linux para arranque inmediato y consumo mínimo de RAM en OpenShift. |
+
+Tipos de API Server
+- Kubernetes API Server: 
+	Funcion: punto de entrada para todas las herramientas externas (oc, kubectl)
+	Pods: kube-apiserver-master-node
+	Namespace: openshift-kube-apiserver
+- OpenShift API Server: 
+	Funcion: maneja los recursos especificos de OpenShift
+	Pods: apiserver-hash
+	Namespace: openshift-apiserver
+- OpenShift OAuth API Server: apiserver-hash
+	Funcion: se encarga de la autenticacion y gestion de tokens de usuarios
+	Pods: apiserver-hash
+	Namespace: openshift-oauth-apiserver
+
+Etcd
+Pods: etcd-cluster-master-node
+Namespace: openshift-etcd
+
+
+
+Hello World
+```
+oc new-app https://github.com/rgerardi/hellogo.git
+```
+Parks Map
+```
+oc new-app quay.io/openshiftroadshow/parksmap:latest --name=parksmap
+```
+
+Service Discovery
+```
+oc new-app --name alpaca --image jmutai/kuard-amd64:blue
+```
+
+Deploy feelings app
+Deploy hello-node
+Deploy python-basic
+Deploy node-with-cm y ejecutar:
+```
+oc set volume deployment/config-app --add --name=config-volume \ --type=configmap --configmap-name=app-config \ --mount-path=/opt/app-root/config oc expose svc/config-app
+```
+Deploy python-ready
+```
+oc set probe deployment/probe-app --liveness --get-url=http://:8080/healthz --initial-delay-seconds=5
+oc set probe deployment/probe-app --readiness --get-url=http://:8080/ready --initial-delay-seconds=5
+```
+
+
+Configurar WebHook en GitHub para push de Build
+
+```bash
+oc describe bc python-basic -n admin-admin | grep -A5 "GitHub"
+```
+Obtener Secret de BC
+```
+oc get bc/python-basic -o yaml | grep -C 5 triggers
+```
+
+Extraer el secret
+
+```
+oc extract secret/java-app-github-webhook-secret --to=-
+```
+Validar que existe el clusterrole system:build-webhook
+```bash
+oc get clusterrole system:build-webhook
+```
+Si no existe, crearlo
+```
+cat <<'EOF' | oc apply -f -
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: system:build-webhook
+rules:
+- apiGroups:
+  - build.openshift.io
+  resources:
+  - buildconfigs/webhooks
+  verbs:
+  - create
+  - get
+EOF
+```
+Vincular el clusterrole con el user system:anonymous
+```
+oc create clusterrolebinding system:build-webhook \
+  --clusterrole=system:build-webhook \
+  --user=system:anonymous
+```
+
+### Validar variable desde Dockerfile y desde BuildConfig y Deployment
+### Configurar ruta con un DNS custom
+```
+oc create route edge <route-name> --service=<service-name> --hostname=<your-domain.com>
+```
+### Configurar Network Policies
+
+```
+kind: NetworkPolicy
+apiVersion: networking.k8s.io/v1
+metadata:
+  name: permitir-python-hacia-nginx
+  namespace: admin-2 # Se aplica en el destino (donde está Nginx)
+spec:
+  podSelector:
+    matchLabels:
+      deployment: nginx # El pod "objetivo" que queremos proteger
+  policyTypes:
+    - Ingress
+  ingress:
+    - ports:
+        - protocol: TCP
+          port: 8080 # O el puerto real en el que escuche tu Nginx
+      from:
+        # Combinación de ambos selectores (Lógica AND)
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: admin-admin # 1. Filtra el Namespace origen
+          podSelector:
+            matchLabels:
+              deployment: python-basic # 2. Filtra el Pod específico dentro de ese Namespace
+```
+
+### Taint y tolerations
+
+Aplicar taint a un nodo
+```
+oc taint nodes <nombre-de-tu-nodo> workload-type=production:NoSchedule
+```
+
+Aplicar nodeSelector a un deployment
+```
+nodeSelector:
+    workload-type: production
+```
+Aplicar NodeAffinity de ambas formas
+```
+      affinity:
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100 # Prioridad alta para esta regla (de 1 a 100)
+            preference:
+              matchExpressions:
+              - key: workload-type
+                operator: In
+                values:
+                - production
+```
+
+```
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx-hard-affinity
+  namespace: admin-admin
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: nginx
+  template:
+    metadata:
+      labels:
+        app: nginx
+    spec:
+      containers:
+      - name: nginx
+        image: nginx:latest
+        ports:
+        - containerPort: 80
+      
+      # 1. EL PASE DE ACCESO: Permite al pod entrar si el nodo tiene un Taint
+      tolerations:
+        - key: workload-type
+          operator: Equal
+          value: production
+          effect: NoSchedule
+
+      # 2. EL IMÁN COMPULSORIO: Obliga al pod a buscar nodos con etiquetas específicas
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: storage-type
+                operator: In
+                values:
+                - fast
+```
+
+### NoodeSelector vs NodeAffinity
+Ejecutarse en nodos de zone-1 o zone-2
+```
+operator: In
+values: [zone-1, zone-2]
+```
+
+o ejecutarse en nodos legacy-worker
+```
+operator: NotIn
+values: [legacy-worker]
+```
+```
+- key: gpu
+  operator: Exists
+```
+### PodDisruptionBadge
+```
+# Garantizar mínimo 2 pods disponibles
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: python-basic-pdb
+spec:
+  minAvailable: 2       # o usar maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: python-basic
+```
+Si tienes 2 réplicas y `minAvailable: 2`, el drenado de un nodo quedará **bloqueado** — OpenShift no podrá desalojar el pod. Para el workshop es un buen ejercicio mostrar ese bloqueo y resolverlo aumentando réplicas a 3
+
+### HPA para aplicacion python-basic
+```
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: python-basic-hpa
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: python-basic
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 60
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 70
+```
+Requisito: el Deployment **debe tener `resources.requests` definidos**, si no el HPA no puede calcular el porcentaje.
+![[Pasted image 20260528204214.png]]
+![[Pasted image 20260528204026.png]]
+Prueba de carga
+```
+oc run load-gen --image=registry.access.redhat.com/ubi8/ubi --restart=Never -- /bin/bash
+dnf install -y wget
+while true; do wget -q -O- http://python-basic; done
+```
+
+### Vertical Pod AutoScaler
+```
+apiVersion: autoscaling.k8s.io/v1
+kind: VerticalPodAutoscaler
+metadata:
+  name: python-basic-vpa
+spec:
+  targetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: python-basic
+  updatePolicy:
+    updateMode: "Auto"   # Off | Initial | Recreate | Auto
+  resourcePolicy:
+    containerPolicies:
+    - containerName: python-basic
+      minAllowed:
+        cpu: "50m"
+        memory: "64Mi"
+      maxAllowed:
+        cpu: "2"
+        memory: "1Gi"
+```
+
+| Modo      | Comportamiento                 |
+| --------- | ------------------------------ |
+| `Off`     | Solo recomienda, no aplica     |
+| `Initial` | Aplica solo al crear el pod    |
+| `Auto`    | Recrea pods con nuevos valores |
+## El Desglose de las Recomendaciones
+
+### 1. `target` (El Objetivo Ideal)
+
+- **CPU:** `30m` (mili-cores) | **Memoria:** `30Mi`
+    
+- **Significado:** Este es el valor real que el VPA considera óptimo para que tu Nginx corra de forma saludable en este momento. Si tu `updatePolicy` estuviera en `"Auto"`, el VPA reiniciaría el Pod justo ahora para clavarle exactamente `30m` de CPU y `30Mi` de memoria en los `requests`.
+    
+
+### 2. `lowerBound` (El Límite Inferior)
+
+- **CPU:** `25m` | **Memoria:** `30Mi`
+    
+- **Significado:** Es el piso mínimo. Si el consumo de tu Nginx baja drásticamente por las noches, el VPA nunca le asignará menos de esto. Mientras el Pod se mantenga consumiendo entre el `lowerBound` y el `upperBound`, el VPA no se molestará en reiniciar el Pod (evita reinicios innecesarios por fluctuaciones pequeñas).
+    
+
+### 3. `upperBound` (El Límite Superior)
+
+- **CPU:** `30m` | **Memoria:** `30Mi`
+    
+- **Significado:** Es el techo máximo estimado para picos de carga normales basados en el histórico actual. Si el Pod de repente empieza a consumir más que el `upperBound`, el VPA actuará de inmediato para subirle los recursos.
+    
+
+### 4. `uncappedTarget` (El Objetivo Sin Restricciones)
+
+- **CPU:** `49m` | **Memoria:** `262144k` (aprox. `256Mi`)
+    
+- **Significado:** **Esta es la métrica más interesante.** Te dice qué recursos le daría el VPA al contenedor si tú **no** le hubieras puesto límites en la sección `resourcePolicy` (el `minAllowed` y `maxAllowed` de tu YAML).
+
+### Blue-Green Deployment
+```
+# Deployment Blue (versión actual)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: python-basic-blue
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: python-basic
+      version: blue
+  template:
+    metadata:
+      labels:
+        app: python-basic
+        version: blue
+    spec:
+      containers:
+      - name: python-basic
+        image: python-basic:v1
+---
+# Deployment Green (nueva versión)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: python-basic-green
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: python-basic
+      version: green
+  template:
+    metadata:
+      labels:
+        app: python-basic
+        version: green
+    spec:
+      containers:
+      - name: python-basic
+        image: python-basic:v2
+---
+# Service apuntando a Blue
+apiVersion: v1
+kind: Service
+metadata:
+  name: python-basic
+spec:
+  selector:
+    app: python-basic
+    version: blue     # <-- cambiar a "green" para el switch
+  ports:
+  - port: 8080
+```
+Dos versiones en paralelo; el switch es instantaneo cambiando el Service
+### Canary Deployment
+```
+# Route con split de tráfico
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: python-basic
+spec:
+  host: python-basic.apps.cluster.example.com
+  to:
+    kind: Service
+    name: python-basic-stable
+    weight: 90          # 90% al stable
+  alternateBackends:
+  - kind: Service
+    name: python-basic-canary
+    weight: 10          # 10% al canary
+  port:
+    targetPort: 8080
+```
+
+Prueba
+```
+for i in $(seq 1 20); do curl -s https://python-basic.apps.cluster.example.com/version done
+```
+
+
+### Dia 6: Secrets
+```
+echo -n "MiPasswordSeguro" | base64
+```
+
+Encriptacion de etcd
+```
+oc patch apiserver cluster --type=merge -p '{"spec":{"encryption":{"type":"aescbc"}}}'
+```
+
+Install Kubeseal
+https://github.com/bitnami-labs/sealed-secrets
+```shell
+helm repo add sealed-secrets https://bitnami-labs.github.io/sealed-secrets
+```
+
+```shell
+helm install sealed-secrets -n kube-system --set-string fullnameOverride=sealed-secrets-controller sealed-secrets/sealed-secrets
+```
+
+```
+oc get pods -n kube-system
+```
+
+Cifrar un Secret localmente
+```
+kubeseal --format=yaml < mi-secret.yaml > mi-secret-sealed.yaml
+```
+
+```
+oc create secret generic mi-password-db \ --from-literal=password='SuperSecret123' \ --dry-run=client -o yaml | \ kubeseal --format=yaml > sealed-secret-db.yaml
+```
+
+Cifrar en modo Offline
+```
+kubeseal --fetch-cert > llave-publica-cluster.pem
+```
+
+```
+kubeseal --cert=llave-publica-cluster.pem --format=yaml < mi-secreto.yaml > mi-secreto-sealed.yaml
+```
+
+
+Por defecto, `kubeseal` utiliza un modo llamado **`strict`** (estricto). Esto significa que la llave pública cifra el secreto combinándolo con el **nombre del secreto** y el **namespace** (`admin-admin`).
+
+Si intentamos copiar el `SealedSecret` de arriba y cambiarle el namespace a `admin-2` a mano en el YAML para reutilizarlo, el controlador de OpenShift **fallará al descifrarlo** y arrojará un error en los logs. Esto es una medida de seguridad espectacular para evitar que un desarrollador le robe secretos a otro proyecto simplemente cambiando el destino del despliegue.
+
+
+Ejercicio 1
+Secret
+```
+apiVersion: v1
+kind: Secret
+metadata:
+  name: db-credentials
+  namespace: admin-admin
+type: Opaque
+data:
+  DB_USER: cm9vdA==
+  DB_PASSWORD: UGFzczEyMw==
+```
+Deployment
+```
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend-db-app
+  namespace: admin-admin
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: backend-db
+  template:
+    metadata:
+      labels:
+        app: backend-db
+    spec:
+      containers:
+      - name: python-app
+        image: registry.access.redhat.com/ubi9/python-39:latest
+        env:
+        - name: DATABASE_USER
+          valueFrom:
+            secretKeyRef:
+              name: db-credentials
+              key: DB_USER
+        - name: DATABASE_PASS
+          valueFrom:
+            secretKeyRef:
+              name: db-credentials
+              key: DB_PASSWORD
+```
+
+### Secrets de tipo tls
+
+¿Cómo funciona la arquitectura por detrás?
+
+Cuando montas un `Secret` como volumen, el plano de control de OpenShift y el motor de contenedores del nodo (CRI-O) trabajan en equipo para realizar un montaje de tipo **tmpfs** (un disco virtual residente puramente en la memoria RAM del nodo).
+
+Características clave de este comportamiento:
+
+- **Seguridad Absoluta:** Los archivos del certificado (`tls.crt` y `tls.key`) **nunca se escriben en el disco duro físico del Worker**. Si alguien apaga el servidor o roba el disco, no hay rastro de las llaves.
+    
+- **Actualización en Caliente (Hot Swap):** El proceso `kubelet` del nodo revisa constantemente si el Secret cambió en la API de OpenShift. Si lo actualizas, `kubelet` actualiza los archivos simbióticos dentro del contenedor en cuestión de minutos **sin reiniciar el Pod**.
+    
+
+```
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: secure-nginx
+  namespace: admin-admin
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: web-secure
+  template:
+    metadata:
+      labels:
+        app: web-secure
+    spec:
+      containers:
+      - name: nginx
+        image: nginx:latest
+        volumeMounts:
+        - name: cert-volume
+          mountPath: "/etc/nginx/certs"
+          readOnly: true
+      volumes:
+      - name: cert-volume
+        secret:
+          secretName: nginx-certs
+```
+
+Configuración de Nginx (`nginx.conf`)
+
+Para que el contenedor de Nginx realmente aproveche estos archivos montados, necesita un archivo de configuración que le indique dónde buscar las llaves para activar el puerto `443` (HTTPS).
+
+```
+server {
+    listen              443 ssl;
+    server_name         mi-app.admin-2.svc;
+
+    # Rutas exactas donde el volumen del Secret dejará los archivos
+    ssl_certificate     /etc/nginx/certs/tls.crt;
+    ssl_certificate_key /etc/nginx/certs/tls.key;
+
+    ssl_protocols       TLSv1.2 TLSv1.3;
+    ssl_ciphers         HIGH:!aNULL:!MD5;
+
+    location / {
+        root   /usr/share/nginx/html;
+        index  index.html index.htm;
+    }
+}
+```
+
+
+```
+openssl req -x509 -nodes -days 365 -newkey rsa:2048 \ -keyout tls.key \ -out tls.crt \ -subj "/CN=mi-app.admin-admin.svc"
+```
+
+```
+oc create secret tls nginx-certs \ --cert=tls.crt \ --key=tls.key \ -n admin-admin
+```
+
+```
+apiVersion: v1
+kind: Secret
+metadata:
+  name: nginx-certs
+  namespace: admin-admin
+type: kubernetes.io/tls
+data:
+  # Certificado de pruebas codificado en Base64
+  tls.crt: |
+    LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCk1JSURTekNDQm9HZ0F3SUJBZ0lVSm9wM2N3
+    MXV4RjZCc0I0eTd6dmU2K0R4dFlvd0RRWUpLb1pJaHZjTkFRRUwKQlFBd01URUxNQWtHQTFV
+    QmhNQ1ZWTXhGekFWQmdOVkJBb01EbWxoZDJVdVlXUnRhVzR0WVdSdGFXNHVjM1pqCk1CNFhE
+    VEl3TlRFeE16QXdNRFl3TUZvWERUSXhOVEV4TXpBd01EWXdNRm93TVRFTE1Ba0dBMVRequest
+    QmhNQ1ZWTXgKRnpBVkJnTlZCQU9NRG1saGQyVXVZV1J0YVc0dFlXUnRhVzR1YzNTak1JSUJJ
+    akFOQmdrcWhraUc5dzBCQVFFRgpBQU9DQVE4QU1JSUJDZ0tDQVFFQXp2b0t3U1l0K2p0YmRN
+    bW9zS2t5Cg==
+  
+  # Llave privada de pruebas codificada en Base64
+  tls.key: |
+    LS0tLS1CRUdJTiBQUklWQVRFIEtFWS0tLS0tCk1JSUV2Z0lCQURBTkJna3Foa2lHOXcwQkFR
+    RUZBQVNDQktnd2dnU2tBZ0VBQW9JQkFRRHp2b0t3U1l0K2p0YmQKTW1vc0treVVvN0ZBcjdG
+    bThwN00rejd2ZTYrRHh0WW93RFFZSktvWklodmNOQVFFTEJRQXdNVEVMTUFrR0ExVUUKQmhN
+    Q1ZWTXhGekFWQmdOVkJBb01EbWxoZDJVdVlXUnRhVzR0WVdSdGFXNHVjM1pqTUI0WERUSXdO
+    VEV4TXpBdwpNRFl3TUZvWERUSXhOVEV4TXpBd01EWXdN">
+```
+
+Cifrar etcd
+```
+oc create secret generic secreto-auditoria \
+  --from-literal=token-secreto='ClaveSuperSecretaDeEtcd' \
+  -n admin-admin
+```
+
+```
+etcdctl get /kubernetes.io/secrets/admin-admin/secreto-auditoria
+```
+
+Encriptacion
+```
+oc patch apiserver cluster --type=merge -p '{"spec":{"encryption":{"type":"aescbc"}}}'
+```
+
+Monitoreo de avance de encriptacion
+```
+oc get apiserver cluster
+```
+
+En logs
+```
+oc logs -n openshift-kube-apiserver-operator deployment/kube-apiserver-operator | grep -E "encryption|migration"
+```
+
+En Prometheus
+```
+apiserver_encryption_migrated_resources_count
+```
+## 1. El Impacto en la Funcionalidad (Disponibilidad del Clúster)
+
+**Riesgo de Downtime: Casi Cero.** OpenShift no bloquea la base de datos ni apaga el API Server para cifrar. El operador de OpenShift (`kube-apiserver-operator`) realiza una **migración progresiva y en caliente**.
+
+- **Cómo funciona por detrás:** El operador crea una llave de cifrado y luego empieza a reescribir cada Secreto y ConfigMap uno a uno. Si una aplicación pide un secreto a mitad del proceso, el API Server es lo suficientemente inteligente como para saber si debe leerlo con la llave nueva o en texto plano (basándose en el prefijo `k8s:enc:`). Las aplicaciones no experimentan interrupciones.
+
+
+## 2. El Impacto en el Rendimiento (Performance)
+
+Aquí es donde sí hay un costo real, aunque hoy en día es marginal:
+
+- **Consumo de CPU en los Masters:** Cifrar y descifrar datos sobre la marcha requiere ciclos de reloj de la CPU. Cada vez que un Pod arranque, se mueva o requiera leer un Secret/ConfigMap, los nodos Master tendrán que descifrarlo en memoria RAM.
+
+- **Mitigación moderna:** Los procesadores modernos (tanto en AWS como en servidores Bare-Metal Intel/AMD) cuentan con instrucciones **AES-NI** por hardware. Esto significa que el cifrado se procesa casi a la velocidad del silicio, por lo que el aumento de consumo de CPU en los Masters suele ser de apenas un **1% a 3%**.
+
+## 3. El Verdadero Peligro: Recuperación ante Desastres (Disaster Recovery)
+
+Este es el único punto donde aplicar el cifrado se vuelve "peligroso" si no se gestiona con disciplina de arquitectura: **Los Backups de etcd.**
+
+- **El escenario sin cifrado:** Si el clúster muere por completo, puedes tomar un backup viejo de etcd, restaurarlo en nodos nuevos y levantar el plano de control fácilmente.
+    
+- **El escenario con cifrado:** El backup de etcd ahora contiene datos encriptados. Para poder restaurar ese backup con éxito en el futuro, **necesitas obligatoriamente las llaves de cifrado activas del clúster**.
+    
+
+>  Si pierdes el clúster y la configuración de las llaves de cifrado que estaban activas en el momento de tomar el backup, ese backup de etcd se convierte en un archivo de basura binaria completamente inútil. No podrás recuperar el clúster.
+
+
+Comparativa
+
+| **Característica / Escenario**               | **Sin Cifrado en etcd (Solo Secret Nativo)**                                                             | **Con Cifrado en etcd Activo**                                                                     |
+| -------------------------------------------- | -------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| **Acceso desde `oc get secret`**             | Legible (Cualquiera con permisos de RBAC/Namespace lo ve).                                               | **Exactamente igual**. El API Server lo descifra automáticamente para los usuarios autorizados.    |
+| **Ataque físico / Robo de disco del Master** | **Peligro total.** El atacante lee las contraseñas corporativas en texto plano directamente del disco. | **Protegido.** El atacante solo ve basura binaria (`k8s:enc:`). El disco es inútil sin las llaves. |
+| **Backups de etcd expuestos**                | **Inseguro.** Si alguien roba un snapshot del backup de etcd, expone los secretos de toda la empresa.  | **Seguro.** El archivo de backup está encriptado en reposo.                                        |
+| **Cumplimiento de Normativas (Compliance)**  | **Falla.** No pasa auditorías de estándares estrictos como PCI-DSS, HIPAA o ISO 27001.                 | **Cumple.** Satisface el requerimiento técnico de _Encryption at Rest_ (Cifrado en reposo).        |
+
+Jobs
+```
+# =============================================================================
+# JOB
+# =============================================================================
+#
+# ¿Qué es un Job?
+#   Un Job garantiza que una tarea se ejecute hasta completarse exitosamente
+#   un número determinado de veces. A diferencia de un Deployment, el pod
+#   NO se reinicia cuando termina correctamente — se considera "completado".
+#
+# ¿Cuándo usarlo?
+#   - Migraciones de base de datos (flyway, liquibase)
+#   - Procesamiento batch de archivos
+#   - Envío masivo de emails
+#   - Generación de reportes
+#   - Tareas de inicialización únicas
+#
+# Diferencia clave vs Deployment:
+#   Deployment → proceso largo que debe mantenerse vivo (web server, api)
+#   Job        → tarea que tiene un inicio y un fin definidos
+#
+# =============================================================================
+
+---
+# ─────────────────────────────────────────────────────────────────────────────
+# Ejemplo 1 — Job simple
+# Caso de uso: tarea puntual que se ejecuta una sola vez
+# ─────────────────────────────────────────────────────────────────────────────
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: job-simple
+  namespace: workloads-demo
+  labels:
+    app: job-simple
+    app.kubernetes.io/part-of: workloads-demo
+spec:
+
+  # completions: cuántas veces debe completarse el Job exitosamente.
+  # Default: 1. Con completions=1 el Job termina cuando un pod completa.
+  completions: 1
+
+  # parallelism: cuántos pods pueden correr simultáneamente.
+  # Default: 1. Si parallelism > 1 y completions > 1, los pods trabajan
+  # en paralelo hasta alcanzar el total de completions.
+  parallelism: 1
+
+  # backoffLimit: cuántos reintentos permite antes de marcar el Job como Failed.
+  # Default: 6. Cada reintento crea un nuevo pod.
+  backoffLimit: 3
+
+  # activeDeadlineSeconds: tiempo máximo en segundos para que el Job complete.
+  # Si se supera, Kubernetes cancela el Job y marca todos sus pods como Failed.
+  # Útil para evitar Jobs colgados indefinidamente.
+  activeDeadlineSeconds: 120
+
+  # ttlSecondsAfterFinished: segundos que el Job (y sus pods) se mantienen
+  # después de completarse. Pasado ese tiempo se eliminan automáticamente.
+  # Sin esto, los Jobs completados se acumulan en el namespace.
+  ttlSecondsAfterFinished: 300
+
+  template:
+    metadata:
+      labels:
+        app: job-simple
+    spec:
+      # restartPolicy en Jobs SOLO puede ser Never u OnFailure.
+      # Never    → si el pod falla, Kubernetes crea un pod nuevo (backoffLimit)
+      # OnFailure→ si el contenedor falla, reinicia el mismo pod
+      restartPolicy: Never
+
+      containers:
+        - name: tarea
+          image: registry.access.redhat.com/ubi9/ubi-minimal:latest
+          command:
+            - /bin/bash
+            - -c
+            - |
+              echo "=== Inicio de la tarea ==="
+              echo "Fecha: $(date)"
+              echo "Hostname: $(hostname)"
+              echo ""
+              echo "Simulando procesamiento batch..."
+              for i in $(seq 1 5); do
+                echo "  Procesando registro $i/5..."
+                sleep 1
+              done
+              echo ""
+              echo "=== Tarea completada exitosamente ==="
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+
+---
+# ─────────────────────────────────────────────────────────────────────────────
+# Ejemplo 2 — Job paralelo
+# Caso de uso: procesar múltiples items en paralelo (ej: envío de emails)
+# ─────────────────────────────────────────────────────────────────────────────
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: job-paralelo
+  namespace: workloads-demo
+  labels:
+    app: job-paralelo
+    app.kubernetes.io/part-of: workloads-demo
+spec:
+  # 6 completions con 2 pods en paralelo:
+  # Kubernetes lanza 2 pods simultáneos, cuando uno termina lanza otro,
+  # hasta que 6 pods hayan completado exitosamente.
+  completions: 6
+  parallelism: 2
+  backoffLimit: 2
+  ttlSecondsAfterFinished: 300
+
+  template:
+    metadata:
+      labels:
+        app: job-paralelo
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: worker
+          image: registry.access.redhat.com/ubi9/ubi-minimal:latest
+          command:
+            - /bin/bash
+            - -c
+            - |
+              echo "Worker $(hostname) iniciado"
+              # Simular tiempo de procesamiento variable
+              TIEMPO=$((RANDOM % 5 + 2))
+              echo "Procesando item durante ${TIEMPO}s..."
+              sleep $TIEMPO
+              echo "Worker $(hostname) completado"
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+
+---
+# ─────────────────────────────────────────────────────────────────────────────
+# Ejemplo 3 — Job de migración de base de datos
+# Caso de uso real: ejecutar scripts SQL antes de desplegar una nueva versión
+# ─────────────────────────────────────────────────────────────────────────────
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: job-migracion-db
+  namespace: workloads-demo
+  labels:
+    app: job-migracion-db
+    app.kubernetes.io/part-of: workloads-demo
+  annotations:
+    # Documentar el propósito del Job directamente en el manifiesto
+    description: "Migración de esquema v1 a v2 — ejecutar antes del Deployment"
+spec:
+  completions: 1
+  parallelism: 1
+  # Las migraciones deben ejecutarse UNA sola vez y sin reintentos
+  # para evitar aplicar el mismo script dos veces
+  backoffLimit: 0
+  activeDeadlineSeconds: 300
+  ttlSecondsAfterFinished: 600
+
+  template:
+    metadata:
+      labels:
+        app: job-migracion-db
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: migracion
+          image: registry.access.redhat.com/ubi9/ubi-minimal:latest
+          command:
+            - /bin/bash
+            - -c
+            - |
+              echo "Iniciando migración de base de datos..."
+              echo "Versión origen: v1"
+              echo "Versión destino: v2"
+              echo ""
+              echo "Ejecutando: ALTER TABLE pedidos ADD COLUMN descuento DECIMAL(5,2);"
+              sleep 2
+              echo "Ejecutando: CREATE INDEX idx_pedidos_estado ON pedidos(estado);"
+              sleep 2
+              echo "Ejecutando: UPDATE schema_version SET version='v2';"
+              sleep 1
+              echo ""
+              echo "Migración completada. Esquema en versión v2."
+          env:
+            # Las credenciales siempre desde Secrets, nunca hardcodeadas
+            - name: DB_HOST
+              value: "postgresql.workloads-demo.svc"
+            - name: DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: db-secret
+                  key: username
+                  # optional: true permite que el Job arranque aunque el Secret
+                  # no exista (útil en entornos de demo sin BD real)
+                  optional: true
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: db-secret
+                  key: password
+                  optional: true
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+
+# =============================================================================
+# Comandos útiles para trabajar con Jobs
+# =============================================================================
+#
+# Crear el Job:
+#   oc apply -f 01-job.yaml
+#
+# Ver estado:
+#   oc get jobs -n workloads-demo
+#
+# Ver pods del Job (incluyendo completados):
+#   oc get pods -n workloads-demo --selector=app=job-simple
+#
+# Ver logs:
+#   oc logs -l app=job-simple -n workloads-demo
+#
+# Esperar a que complete:
+#   oc wait --for=condition=complete job/job-simple -n workloads-demo --timeout=120s
+#
+# Ejecutar el Job nuevamente (los Jobs no se pueden re-ejecutar, hay que recrearlos):
+#   oc delete job job-simple -n workloads-demo
+#   oc apply -f 01-job.yaml
+#
+# Ver Jobs completados y fallidos:
+#   oc get jobs -n workloads-demo -o wide
+#
+# =============================================================================
+```
+
+CronJobs
+```
+# =============================================================================
+# CRONJOB
+# =============================================================================
+#
+# ¿Qué es un CronJob?
+#   Un CronJob es un Job que se ejecuta automáticamente según un schedule
+#   definido en formato cron. En cada ejecución programada, el CronJob
+#   crea un Job nuevo, que a su vez crea el pod.
+#
+# Jerarquía:
+#   CronJob → crea → Job → crea → Pod
+#
+# ¿Cuándo usarlo?
+#   - Backups periódicos de base de datos
+#   - Limpieza de archivos temporales o logs viejos
+#   - Generación de reportes diarios/semanales
+#   - Sincronización de datos entre sistemas
+#   - Envío de emails programados (newsletters, resúmenes)
+#   - Rotación de secretos o tokens
+#
+# Formato del schedule (cron estándar):
+#   ┌──── minuto      (0-59)
+#   │ ┌── hora        (0-23)
+#   │ │ ┌─ día del mes (1-31)
+#   │ │ │ ┌ mes        (1-12)
+#   │ │ │ │ ┌ día semana (0-7, 0 y 7 = domingo)
+#   │ │ │ │ │
+#   * * * * *
+#
+# Ejemplos de schedule:
+#   "*/5 * * * *"    → cada 5 minutos
+#   "0 * * * *"      → cada hora en punto
+#   "0 2 * * *"      → todos los días a las 2:00 AM
+#   "0 2 * * 1"      → todos los lunes a las 2:00 AM
+#   "0 0 1 * *"      → el primer día de cada mes a medianoche
+#   "0 8-18 * * 1-5" → cada hora entre 8:00 y 18:00, de lunes a viernes
+#
+# =============================================================================
+
+---
+# ─────────────────────────────────────────────────────────────────────────────
+# Ejemplo 1 — CronJob básico cada 5 minutos
+# Caso de uso: verificación periódica de salud de un sistema externo
+# ─────────────────────────────────────────────────────────────────────────────
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: cronjob-health-check
+  namespace: workloads-demo
+  labels:
+    app: cronjob-health-check
+    app.kubernetes.io/part-of: workloads-demo
+spec:
+  # Schedule en formato cron — cada 5 minutos
+  schedule: "*/5 * * * *"
+
+  # timezone: zona horaria del schedule (disponible desde Kubernetes 1.27)
+  # Sin esto el schedule usa UTC. Especificarlo evita confusiones en producción.
+  timeZone: "America/Asuncion"
+
+  # concurrencyPolicy: qué hacer si la ejecución anterior no terminó
+  # cuando llega el momento de la siguiente.
+  #   Allow   → permite ejecuciones simultáneas (default)
+  #   Forbid  → salta la ejecución si la anterior sigue corriendo
+  #   Replace → cancela la anterior y arranca una nueva
+  concurrencyPolicy: Forbid
+
+  # successfulJobsHistoryLimit: cuántos Jobs exitosos conservar.
+  # Default: 3. Reducirlo evita acumulación de pods completados.
+  successfulJobsHistoryLimit: 3
+
+  # failedJobsHistoryLimit: cuántos Jobs fallidos conservar para diagnóstico.
+  # Default: 1. Mantener al menos 1 para poder ver los logs del último fallo.
+  failedJobsHistoryLimit: 1
+
+  # startingDeadlineSeconds: si el CronJob no pudo arrancar en este tiempo
+  # (por ejemplo, el cluster estaba caído), se salta esa ejecución.
+  startingDeadlineSeconds: 60
+
+  # suspend: true pausa el CronJob sin eliminarlo.
+  # Útil para mantenimiento sin perder la configuración.
+  suspend: false
+
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: 60
+      ttlSecondsAfterFinished: 300
+      template:
+        metadata:
+          labels:
+            app: cronjob-health-check
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: health-check
+              image: registry.access.redhat.com/ubi9/ubi-minimal:latest
+              command:
+                - /bin/bash
+                - -c
+                - |
+                  echo "[$(date '+%Y-%m-%d %H:%M:%S')] Iniciando health check..."
+                  # Simular verificación de servicio externo
+                  echo "Verificando conectividad..."
+                  sleep 2
+                  echo "[$(date '+%Y-%m-%d %H:%M:%S')] Sistema operativo. OK"
+              resources:
+                requests:
+                  cpu: 50m
+                  memory: 32Mi
+                limits:
+                  cpu: 100m
+                  memory: 64Mi
+
+---
+# ─────────────────────────────────────────────────────────────────────────────
+# Ejemplo 2 — CronJob de backup diario
+# Caso de uso: backup de base de datos todos los días a las 2:00 AM
+# ─────────────────────────────────────────────────────────────────────────────
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: cronjob-backup-diario
+  namespace: workloads-demo
+  labels:
+    app: cronjob-backup-diario
+    app.kubernetes.io/part-of: workloads-demo
+  annotations:
+    description: "Backup diario de PostgreSQL — retención 7 días"
+spec:
+  schedule: "0 2 * * *"
+  timeZone: "America/Asuncion"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 7  # conservar 1 semana de historial
+  failedJobsHistoryLimit: 3
+  startingDeadlineSeconds: 300   # 5 minutos de margen
+
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 3600  # máximo 1 hora para el backup
+      ttlSecondsAfterFinished: 86400  # mantener 1 día para auditoría
+      template:
+        metadata:
+          labels:
+            app: cronjob-backup-diario
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: backup
+              image: registry.access.redhat.com/ubi9/ubi-minimal:latest
+              command:
+                - /bin/bash
+                - -c
+                - |
+                  FECHA=$(date '+%Y%m%d_%H%M%S')
+                  ARCHIVO="backup_tienda_${FECHA}.sql"
+
+                  echo "=== Backup iniciado: $(date) ==="
+                  echo "Archivo destino: /backups/${ARCHIVO}"
+
+                  # En producción: pg_dump -h $DB_HOST -U $DB_USER $DB_NAME > /backups/$ARCHIVO
+                  echo "Ejecutando pg_dump..."
+                  sleep 5
+                  echo "Comprimiendo backup..."
+                  sleep 2
+                  echo "Verificando integridad..."
+                  sleep 1
+
+                  echo "=== Backup completado: $(date) ==="
+                  echo "Tamaño simulado: 42 MB"
+              env:
+                - name: DB_HOST
+                  value: "postgresql.workloads-demo.svc"
+                - name: DB_USER
+                  valueFrom:
+                    secretKeyRef:
+                      name: db-secret
+                      key: username
+                      optional: true
+                - name: DB_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: db-secret
+                      key: password
+                      optional: true
+              volumeMounts:
+                - name: backup-storage
+                  mountPath: /backups
+              resources:
+                requests:
+                  cpu: 100m
+                  memory: 128Mi
+                limits:
+                  cpu: 500m
+                  memory: 512Mi
+          volumes:
+            - name: backup-storage
+              # En producción usar un PVC. Para el demo, emptyDir es suficiente.
+              emptyDir: {}
+
+---
+# ─────────────────────────────────────────────────────────────────────────────
+# Ejemplo 3 — CronJob de limpieza semanal
+# Caso de uso: eliminar registros viejos de la BD los domingos a medianoche
+# ─────────────────────────────────────────────────────────────────────────────
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: cronjob-limpieza-semanal
+  namespace: workloads-demo
+  labels:
+    app: cronjob-limpieza-semanal
+    app.kubernetes.io/part-of: workloads-demo
+spec:
+  schedule: "0 0 * * 0"   # domingos a medianoche
+  timeZone: "America/Asuncion"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 4   # último mes
+  failedJobsHistoryLimit: 2
+
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: 1800
+      ttlSecondsAfterFinished: 604800  # mantener 1 semana
+      template:
+        metadata:
+          labels:
+            app: cronjob-limpieza-semanal
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: limpieza
+              image: registry.access.redhat.com/ubi9/ubi-minimal:latest
+              command:
+                - /bin/bash
+                - -c
+                - |
+                  echo "=== Limpieza semanal iniciada: $(date) ==="
+                  echo "Eliminando logs de más de 90 días..."
+                  sleep 3
+                  echo "Eliminando sesiones expiradas..."
+                  sleep 2
+                  echo "Eliminando archivos temporales..."
+                  sleep 1
+                  echo "Actualizando estadísticas de la BD..."
+                  sleep 2
+                  echo "=== Limpieza completada: $(date) ==="
+              resources:
+                requests:
+                  cpu: 50m
+                  memory: 64Mi
+                limits:
+                  cpu: 200m
+                  memory: 128Mi
+
+# =============================================================================
+# Comandos útiles para CronJobs
+# =============================================================================
+#
+# Ver CronJobs:
+#   oc get cronjobs -n workloads-demo
+#
+# Ver Jobs generados por el CronJob:
+#   oc get jobs -n workloads-demo -l app=cronjob-backup-diario
+#
+# Disparar manualmente una ejecución sin esperar el schedule:
+#   oc create job --from=cronjob/cronjob-backup-diario backup-manual -n workloads-demo
+#
+# Pausar un CronJob:
+#   oc patch cronjob cronjob-backup-diario -n workloads-demo -p '{"spec":{"suspend":true}}'
+#
+# Reanudar un CronJob:
+#   oc patch cronjob cronjob-backup-diario -n workloads-demo -p '{"spec":{"suspend":false}}'
+#
+# Ver logs del último Job ejecutado:
+#   oc logs -l app=cronjob-backup-diario -n workloads-demo --tail=50
+#
+# Eliminar historial de Jobs manualmente:
+#   oc delete jobs -l app=cronjob-backup-diario -n workloads-demo
+#
+# =============================================================================
+```
+
+StatefulSets
+```
+# =============================================================================
+# STATEFULSET
+# =============================================================================
+#
+# ¿Qué es un StatefulSet?
+#   Un StatefulSet gestiona pods que necesitan identidad estable y
+#   almacenamiento persistente. A diferencia de un Deployment donde
+#   los pods son intercambiables, en un StatefulSet cada pod tiene:
+#
+#   1. Nombre predecible:   app-0, app-1, app-2 (no un hash aleatorio)
+#   2. DNS estable:         app-0.servicio.namespace.svc.cluster.local
+#   3. Almacenamiento propio: cada pod tiene su PVC exclusivo que
+#                             persiste aunque el pod se elimine
+#
+# ¿Cuándo usarlo?
+#   - Bases de datos (PostgreSQL, MySQL, MongoDB)
+#   - Sistemas distribuidos con estado (Kafka, Zookeeper, Elasticsearch)
+#   - Aplicaciones que requieren identidad de red estable
+#   - Clusters donde cada nodo tiene un rol diferente (primary, replica)
+#
+# Diferencia clave vs Deployment:
+#   Deployment   → pods sin estado, intercambiables, con nombre aleatorio
+#   StatefulSet  → pods con estado, identidad fija, orden de arranque garantizado
+#
+# Comportamiento de arranque y parada:
+#   Arranque: en orden ascendente (0 → 1 → 2) — espera que cada pod
+#             esté Ready antes de arrancar el siguiente
+#   Parada:   en orden descendente (2 → 1 → 0)
+#   Update:   en orden descendente por defecto (RollingUpdate)
+#
+# =============================================================================
+
+---
+# ─────────────────────────────────────────────────────────────────────────────
+# Headless Service
+# REQUERIDO para StatefulSet — proporciona el DNS estable por pod.
+# Un Headless Service (clusterIP: None) no tiene IP propia, sino que
+# resuelve directamente a las IPs de los pods.
+#
+# DNS generado para cada pod:
+#   <pod-name>.<service-name>.<namespace>.svc.cluster.local
+#   Ejemplo: app-db-0.app-db-headless.workloads-demo.svc.cluster.local
+# ─────────────────────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: Service
+metadata:
+  name: app-db-headless
+  namespace: workloads-demo
+  labels:
+    app: app-db
+    app.kubernetes.io/part-of: workloads-demo
+spec:
+  # clusterIP: None → esto lo convierte en Headless Service
+  clusterIP: None
+  selector:
+    app: app-db
+  ports:
+    - name: db
+      port: 5432
+      targetPort: 5432
+
+---
+# Service normal para acceso desde otros pods (lectura/escritura al primary)
+apiVersion: v1
+kind: Service
+metadata:
+  name: app-db
+  namespace: workloads-demo
+  labels:
+    app: app-db
+    app.kubernetes.io/part-of: workloads-demo
+spec:
+  selector:
+    app: app-db
+  ports:
+    - name: db
+      port: 5432
+      targetPort: 5432
+
+---
+# ─────────────────────────────────────────────────────────────────────────────
+# StatefulSet — simulando un cluster de base de datos con 3 nodos
+# ─────────────────────────────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: app-db
+  namespace: workloads-demo
+  labels:
+    app: app-db
+    app.kubernetes.io/part-of: workloads-demo
+spec:
+  # serviceName: debe coincidir con el nombre del Headless Service.
+  # Es lo que permite que el StatefulSet genere los DNS por pod.
+  serviceName: app-db-headless
+
+  replicas: 3
+
+  selector:
+    matchLabels:
+      app: app-db
+
+  # updateStrategy: cómo se actualizan los pods cuando cambia el spec.
+  #   RollingUpdate → actualiza de a un pod por vez en orden descendente (default)
+  #   OnDelete      → solo actualiza cuando se elimina manualmente el pod
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      # partition: si se especifica N, solo se actualizan pods con índice >= N.
+      # Útil para canary updates — actualizar solo el pod-2 primero y verificar.
+      partition: 0
+
+  # podManagementPolicy: cómo se crean y eliminan los pods.
+  #   OrderedReady → orden estricto (default) — espera Ready antes del siguiente
+  #   Parallel     → crea/elimina todos a la vez (útil cuando el orden no importa)
+  podManagementPolicy: OrderedReady
+
+  template:
+    metadata:
+      labels:
+        app: app-db
+    spec:
+      # initContainer: se ejecuta antes del contenedor principal.
+      # Útil para determinar si este pod es el primary o una replica.
+      initContainers:
+        - name: init-rol
+          image: registry.access.redhat.com/ubi9/ubi-minimal:latest
+          command:
+            - /bin/bash
+            - -c
+            - |
+              # El nombre del pod tiene el índice al final: app-db-0, app-db-1...
+              # Extraemos el índice para determinar el rol en el cluster.
+              INDICE=${HOSTNAME##*-}
+
+              if [ "$INDICE" = "0" ]; then
+                echo "primary" > /config/rol.txt
+                echo "Este pod es el PRIMARY (lectura y escritura)"
+              else
+                echo "replica" > /config/rol.txt
+                echo "Este pod es una REPLICA (solo lectura). Índice: $INDICE"
+                echo "Conectando al primary: app-db-0.app-db-headless.workloads-demo.svc.cluster.local"
+              fi
+          volumeMounts:
+            - name: config
+              mountPath: /config
+
+      containers:
+        - name: db
+          image: registry.access.redhat.com/ubi9/ubi-minimal:latest
+          command:
+            - /bin/bash
+            - -c
+            - |
+              ROL=$(cat /config/rol.txt)
+              echo "=== Iniciando nodo ${HOSTNAME} ==="
+              echo "Rol: $ROL"
+              echo "DNS propio: ${HOSTNAME}.app-db-headless.workloads-demo.svc.cluster.local"
+              echo "Datos en: /data/${HOSTNAME}"
+              echo ""
+              echo "Esperando conexiones..."
+              # Mantener el pod corriendo para demostración
+              sleep infinity
+          ports:
+            - name: db
+              containerPort: 5432
+          env:
+            - name: POD_NAME
+              # Downward API: inyecta el nombre del pod como variable de entorno
+              # sin necesidad de hardcodearlo
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: config
+              mountPath: /config
+          readinessProbe:
+            exec:
+              command:
+                - /bin/bash
+                - -c
+                - "test -f /config/rol.txt && echo ready"
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+
+      volumes:
+        - name: config
+          emptyDir: {}
+
+  # volumeClaimTemplates: la característica más importante del StatefulSet.
+  # En lugar de compartir un PVC entre todos los pods, cada pod obtiene
+  # su propio PVC creado automáticamente con el nombre:
+  #   <template-name>-<statefulset-name>-<índice>
+  #   Ejemplo: data-app-db-0, data-app-db-1, data-app-db-2
+  #
+  # IMPORTANTE: cuando se elimina el StatefulSet, los PVCs NO se eliminan
+  # automáticamente — los datos persisten. Hay que eliminarlos manualmente.
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          app: app-db
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: 1Gi
+        # storageClassName: ajustar al StorageClass disponible en el clúster
+        # Si se omite, usa el StorageClass por defecto
+        # storageClassName: ocs-storagecluster-ceph-rbd
+
+# =============================================================================
+# Comandos útiles para StatefulSets
+# =============================================================================
+#
+# Ver el StatefulSet y sus pods (nótese el orden y el nombre predecible):
+#   oc get statefulset app-db -n workloads-demo
+#   oc get pods -l app=app-db -n workloads-demo
+#
+# Conectar directamente a un pod específico por su índice:
+#   oc exec -it app-db-0 -n workloads-demo -- /bin/bash   # primary
+#   oc exec -it app-db-1 -n workloads-demo -- /bin/bash   # replica 1
+#   oc exec -it app-db-2 -n workloads-demo -- /bin/bash   # replica 2
+#
+# Ver los PVCs creados automáticamente:
+#   oc get pvc -n workloads-demo -l app=app-db
+#
+# Escalar (los pods nuevos arrancan en orden):
+#   oc scale statefulset app-db --replicas=5 -n workloads-demo
+#
+# Ver el DNS de cada pod desde dentro del clúster:
+#   oc run dns-test --image=curlimages/curl -it --rm --restart=Never \
+#     -n workloads-demo -- \
+#     curl http://app-db-0.app-db-headless.workloads-demo.svc.cluster.local:5432
+#
+# Hacer un rolling update:
+#   oc set image statefulset/app-db db=nueva-imagen:v2 -n workloads-demo
+#   oc rollout status statefulset/app-db -n workloads-demo
+#
+# Rollback:
+#   oc rollout undo statefulset/app-db -n workloads-demo
+#
+# ATENCIÓN al eliminar — los PVCs persisten:
+#   oc delete statefulset app-db -n workloads-demo
+#   oc get pvc -n workloads-demo   # siguen existiendo
+#   oc delete pvc -l app=app-db -n workloads-demo   # eliminar manualmente
+#
+# =============================================================================
+```
+
+Jerarquia de Objetos a nivel de Volumenes
+```
+StorageClass -> Persistent Volume -> Persistent Volume Claim
+```
+Tipos de Storage disponibles en Data Foundation
+```
+Filesystem
+RBD (Block Storage)
+NFS
+S3 (Object Storage)
+```
+
+Modos
+```
+RWO (Read Write Once)
+RWX (Read Write Many)
+RWOP (Read Write Once Pod)
+```
+
